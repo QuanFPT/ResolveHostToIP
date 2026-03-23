@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
+import pandas as pd  # ← thêm dòng này
 
 def resolve_hostname(hostname: str) -> tuple[str, set[str]]:
     try:
@@ -15,7 +16,7 @@ def resolve_hostname(hostname: str) -> tuple[str, set[str]]:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Resolve hostname → so sánh IP với target (nếu có) hoặc chỉ liệt kê IP"
+        description="Resolve hostname → so sánh IP với target (nếu có) hoặc liệt kê IP → xuất Excel"
     )
     parser.add_argument("--ip-file", required=False, 
                         help="File danh sách IP mục tiêu (tùy chọn)")
@@ -23,12 +24,16 @@ def main():
                         help="File danh sách hostname")
     parser.add_argument("--threads", type=int, default=100, 
                         help="Số luồng (default: 100)")
-    parser.add_argument("--output", default="results.txt", 
-                        help="File output kết quả (default: results.txt)")
+    parser.add_argument("--output", default="results.xlsx", 
+                        help="File output Excel (default: results.xlsx)")
     args = parser.parse_args()
 
     host_file = Path(args.host_file)
     output_file = Path(args.output)
+    
+    # Đảm bảo đuôi file là .xlsx
+    if output_file.suffix.lower() != '.xlsx':
+        output_file = output_file.with_suffix('.xlsx')
 
     # Đọc hostname - giữ nguyên thứ tự
     if not host_file.is_file():
@@ -66,13 +71,12 @@ def main():
         print("→ Chế độ: Liệt kê tất cả IP của từng hostname (không so sánh)\n")
 
     # Lưu kết quả theo thứ tự hostname gốc
-    results = {}           # hostname -> set of ips (hoặc set rỗng nếu không resolve được)
+    results = {}           # hostname -> set of ips
     not_resolved = []
 
     print(f"Đang resolve với {args.threads} luồng...\n")
 
     with ThreadPoolExecutor(max_workers=args.threads) as executor:
-        # submit với index để có thể theo dõi thứ tự nếu cần, nhưng thực tế dùng dict đơn giản hơn
         future_to_host = {executor.submit(resolve_hostname, hn): hn for hn in hostnames}
         
         for future in tqdm(as_completed(future_to_host), total=len(hostnames), desc="Progress"):
@@ -82,7 +86,7 @@ def main():
                 results[hn] = resolved_ips
                 if not resolved_ips:
                     not_resolved.append(hn)
-            except Exception as e:
+            except Exception:
                 results[hn] = set()
                 not_resolved.append(hn)
 
@@ -103,64 +107,49 @@ def main():
     print("═" * 70 + "\n")
 
     # ────────────────────────────────────────────────
-    # Xử lý output - giữ nguyên thứ tự trong file gốc
+    # Chuẩn bị dữ liệu cho Excel
+    data = []
+
     if compare_mode:
-        matching_lines = []
-        for hn in hostnames:  # duyệt theo thứ tự gốc
+        for hn in hostnames:
             ips = results.get(hn, set())
             common = ips & target_ips
             if common:
-                matching_lines.append((hn, common))
-
-        if matching_lines:
-            print("KẾT QUẢ MATCHING (theo thứ tự file gốc):")
-            print("-" * 70)
-            for hn, ips in matching_lines:
-                ip_list = sorted(ips)  # chỉ sort IP, không sort hostname
-                print(f"{hn:50} | {', '.join(ip_list)}")
-            print("-" * 70)
-
-            # Ghi file
-            with output_file.open("w", encoding="utf-8") as f:
-                f.write("# Hostname có ít nhất một IP trùng với danh sách mục tiêu\n")
-                f.write("# Thứ tự theo file hostname gốc - Format: hostname:ip\n\n")
-                for hn, ips in matching_lines:
-                    for ip in sorted(ips):
-                        f.write(f"{hn}:{ip}\n")
-            
-            print(f"\nĐã ghi {len(matching_lines)} hostname ({total_matches} dòng) → {output_file}")
+                for ip in sorted(common):
+                    data.append({"Hostname": hn, "IP": ip})
+        
+        if data:
+            print(f"Đã chuẩn bị {len(data)} dòng dữ liệu (chỉ IP trùng) → xuất Excel")
         else:
-            print("Không tìm thấy hostname nào có IP trùng với danh sách mục tiêu.")
+            print("Không có hostname nào khớp với danh sách IP mục tiêu → file Excel sẽ rỗng")
     else:
-        # Chế độ liệt kê tất cả
-        resolved_lines = []
-        for hn in hostnames:  # theo thứ tự gốc
+        for hn in hostnames:
             ips = results.get(hn, set())
             if ips:
-                resolved_lines.append((hn, ips))
-
-        if resolved_lines:
-            print("KẾT QUẢ RESOLVE (theo thứ tự file gốc):")
-            print("-" * 70)
-            for hn, ips in resolved_lines:
-                ip_list = sorted(ips)
-                print(f"{hn:50} | {', '.join(ip_list)}")
-            print("-" * 70)
-
-            # Ghi file
-            with output_file.open("w", encoding="utf-8") as f:
-                f.write("# Kết quả resolve hostname → tất cả IPv4\n")
-                f.write("# Thứ tự theo file hostname gốc - Format: hostname:ip\n\n")
-                for hn, ips in resolved_lines:
-                    for ip in sorted(ips):
-                        f.write(f"{hn}:{ip}\n")
-            
-            total_ips = sum(len(ips) for _, ips in resolved_lines)
-            print(f"\nĐã ghi {len(resolved_lines)} hostname ({total_ips} dòng) → {output_file}")
+                for ip in sorted(ips):
+                    data.append({"Hostname": hn, "IP": ip})
+        
+        if data:
+            total_ips = len(data)
+            print(f"Đã chuẩn bị {total_ips} dòng dữ liệu → xuất Excel")
         else:
-            print("Không có hostname nào resolve được IP.")
+            print("Không có hostname nào resolve được IP → file Excel sẽ rỗng")
 
-    # In hostname lỗi (vẫn giữ top 15 như cũ)
+    # ────────────────────────────────────────────────
+    # Xuất Excel
+    if data:
+        df = pd.DataFrame(data)
+        df.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"Đã xuất file Excel: {output_file}")
+        print(f"→ Số dòng dữ liệu: {len(df)}")
+        print(f"→ Số hostname có dữ liệu: {df['Hostname'].nunique()}")
+    else:
+        # Tạo file rỗng có header để người dùng biết
+        df_empty = pd.DataFrame(columns=["Hostname", "IP"])
+        df_empty.to_excel(output_file, index=False, engine='openpyxl')
+        print(f"Đã tạo file Excel rỗng (chỉ có header): {output_file}")
+
+    # In hostname lỗi (top 15)
     if not_resolved:
         print("\nHostname KHÔNG RESOLVE ĐƯỢC (top 15):")
         for hn in not_resolved[:15]:
